@@ -141,28 +141,32 @@ func (s *Spider) makeRequest(ctx context.Context, method, url string) (*http.Res
 	return resp, err
 }
 
-func (s *Spider) handleSpecialRateLimit(ctx context.Context) error {
-	s.requestTimeMu.Lock()
-	defer s.requestTimeMu.Unlock()
-
-	now := time.Now()
-
-	// If we were recently blocked, wait for the block to expire
-	if !s.lastBlockTime.IsZero() {
-		timeSinceBlock := now.Sub(s.lastBlockTime)
-		if timeSinceBlock < s.config.BlockDuration {
-			remainingWait := s.config.BlockDuration - timeSinceBlock
-			if s.config.Verbose {
-				log.Printf("Still in block period, waiting %v", remainingWait)
-			}
-			s.requestTimeMu.Unlock()
-			time.Sleep(remainingWait)
-			s.requestTimeMu.Lock()
-			now = time.Now()
-		}
+func (s *Spider) waitForBlockExpiry(ctx context.Context, now time.Time) (time.Time, error) {
+	if s.lastBlockTime.IsZero() {
+		return now, nil
 	}
 
-	// Clean old request times (outside the window)
+	timeSinceBlock := now.Sub(s.lastBlockTime)
+	if timeSinceBlock < s.config.BlockDuration {
+		remainingWait := s.config.BlockDuration - timeSinceBlock
+		if s.config.Verbose {
+			log.Printf("Still in block period, waiting %v", remainingWait)
+		}
+		s.requestTimeMu.Unlock()
+		
+		select {
+		case <-ctx.Done():
+			s.requestTimeMu.Lock()
+			return now, ctx.Err()
+		case <-time.After(remainingWait):
+			s.requestTimeMu.Lock()
+			return time.Now(), nil
+		}
+	}
+	return now, nil
+}
+
+func (s *Spider) cleanOldRequestTimes(now time.Time) {
 	cutoff := now.Add(-s.config.TimeWindow)
 	var validTimes []time.Time
 	for _, t := range s.requestTimes {
@@ -171,32 +175,50 @@ func (s *Spider) handleSpecialRateLimit(ctx context.Context) error {
 		}
 	}
 	s.requestTimes = validTimes
+}
 
-	// Check if we've hit the request limit
-	if len(s.requestTimes) >= s.config.MaxRequests {
-		// Calculate how long to wait
-		oldestRequest := s.requestTimes[0]
-		waitTime := s.config.TimeWindow - now.Sub(oldestRequest)
-
-		if waitTime > 0 {
-			if s.config.Verbose {
-				log.Printf("Rate limit reached (%d requests in %v), waiting %v",
-					len(s.requestTimes), s.config.TimeWindow, waitTime)
-			}
-			s.requestTimeMu.Unlock()
-
-			// Use context-aware sleep
-			select {
-			case <-ctx.Done():
-				s.requestTimeMu.Lock()
-				return ctx.Err()
-			case <-time.After(waitTime):
-				s.requestTimeMu.Lock()
-			}
-		}
+func (s *Spider) waitForRateLimit(ctx context.Context, now time.Time) error {
+	if len(s.requestTimes) < s.config.MaxRequests {
+		return nil
 	}
 
-	return nil
+	// Calculate how long to wait
+	oldestRequest := s.requestTimes[0]
+	waitTime := s.config.TimeWindow - now.Sub(oldestRequest)
+
+	if waitTime <= 0 {
+		return nil
+	}
+
+	if s.config.Verbose {
+		log.Printf("Rate limit reached (%d requests in %v), waiting %v",
+			len(s.requestTimes), s.config.TimeWindow, waitTime)
+	}
+	s.requestTimeMu.Unlock()
+
+	// Use context-aware sleep
+	select {
+	case <-ctx.Done():
+		s.requestTimeMu.Lock()
+		return ctx.Err()
+	case <-time.After(waitTime):
+		s.requestTimeMu.Lock()
+		return nil
+	}
+}
+
+func (s *Spider) handleSpecialRateLimit(ctx context.Context) error {
+	s.requestTimeMu.Lock()
+	defer s.requestTimeMu.Unlock()
+
+	now, err := s.waitForBlockExpiry(ctx, time.Now())
+	if err != nil {
+		return err
+	}
+
+	s.cleanOldRequestTimes(now)
+
+	return s.waitForRateLimit(ctx, now)
 }
 
 func (s *Spider) trackRequest() {
@@ -232,49 +254,29 @@ func (s *Spider) isFile(rawURL string) bool {
 	return !strings.HasSuffix(rawURL, "/")
 }
 
-func (s *Spider) discover(ctx context.Context, targetURL string, depth int) error {
-	if depth > s.config.MaxDepth {
-		return nil
-	}
-
-	s.mu.Lock()
-	if s.visited[targetURL] {
-		s.mu.Unlock()
-		return nil
-	}
-	s.visited[targetURL] = true
-	s.mu.Unlock()
-
-	parsedURL, err := url.Parse(targetURL)
+func (s *Spider) processFile(ctx context.Context, targetURL string) error {
+	resp, err := s.makeRequest(ctx, "HEAD", targetURL)
 	if err != nil {
-		return err
-	}
-
-	// Check if it's a file or directory
-	if s.isFile(targetURL) {
-		// For files, just do a HEAD request to check if they exist
-		resp, err := s.makeRequest(ctx, "HEAD", targetURL)
-		if err != nil {
-			if s.config.Verbose {
-				log.Printf("Error checking file %s: %v", targetURL, err)
-			}
-			return nil
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode == 200 && s.shouldAcceptURL(targetURL) {
-			s.mu.Lock()
-			s.discovered = append(s.discovered, targetURL)
-			s.mu.Unlock()
-
-			if s.config.Verbose {
-				log.Printf("Found file: %s", targetURL)
-			}
+		if s.config.Verbose {
+			log.Printf("Error checking file %s: %v", targetURL, err)
 		}
 		return nil
 	}
+	defer resp.Body.Close()
 
-	// For directories, get the content and parse for links
+	if resp.StatusCode == 200 && s.shouldAcceptURL(targetURL) {
+		s.mu.Lock()
+		s.discovered = append(s.discovered, targetURL)
+		s.mu.Unlock()
+
+		if s.config.Verbose {
+			log.Printf("Found file: %s", targetURL)
+		}
+	}
+	return nil
+}
+
+func (s *Spider) processDirectory(ctx context.Context, targetURL string, depth int) error {
 	resp, err := s.makeRequest(ctx, "GET", targetURL)
 	if err != nil {
 		if s.config.Verbose {
@@ -293,6 +295,15 @@ func (s *Spider) discover(ctx context.Context, targetURL string, depth int) erro
 		return err
 	}
 
+	return s.processLinks(ctx, doc, targetURL, depth)
+}
+
+func (s *Spider) processLinks(ctx context.Context, doc *goquery.Document, baseURL string, depth int) error {
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return err
+	}
+
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, 5) // Limit concurrent requests
 
@@ -302,23 +313,10 @@ func (s *Spider) discover(ctx context.Context, targetURL string, depth int) erro
 			return
 		}
 
-		// Resolve relative URLs
-		linkURL, err := parsedURL.Parse(href)
-		if err != nil {
+		fullURL := s.resolveURL(parsedURL, href)
+		if fullURL == "" {
 			return
 		}
-
-		// Skip external links
-		if linkURL.Host != parsedURL.Host {
-			return
-		}
-
-		// Skip parent directory links
-		if strings.Contains(href, "..") {
-			return
-		}
-
-		fullURL := linkURL.String()
 
 		// Skip if already visited
 		s.mu.RLock()
@@ -344,6 +342,46 @@ func (s *Spider) discover(ctx context.Context, targetURL string, depth int) erro
 
 	wg.Wait()
 	return nil
+}
+
+func (s *Spider) resolveURL(parsedURL *url.URL, href string) string {
+	// Resolve relative URLs
+	linkURL, err := parsedURL.Parse(href)
+	if err != nil {
+		return ""
+	}
+
+	// Skip external links
+	if linkURL.Host != parsedURL.Host {
+		return ""
+	}
+
+	// Skip parent directory links
+	if strings.Contains(href, "..") {
+		return ""
+	}
+
+	return linkURL.String()
+}
+
+func (s *Spider) discover(ctx context.Context, targetURL string, depth int) error {
+	if depth > s.config.MaxDepth {
+		return nil
+	}
+
+	s.mu.Lock()
+	if s.visited[targetURL] {
+		s.mu.Unlock()
+		return nil
+	}
+	s.visited[targetURL] = true
+	s.mu.Unlock()
+
+	if s.isFile(targetURL) {
+		return s.processFile(ctx, targetURL)
+	}
+
+	return s.processDirectory(ctx, targetURL, depth)
 }
 
 func (s *Spider) DiscoverStructure(ctx context.Context) ([]string, error) {
@@ -458,6 +496,76 @@ func loadURLsFromFile(filename string) ([]string, error) {
 	return urls, scanner.Err()
 }
 
+func showUsage() {
+	fmt.Println("Usage: webspider -url <base-url> [options]")
+	fmt.Println("   or: webspider -urls <url-list-file> [options]")
+	fmt.Println("\nOptions:")
+	flag.PrintDefaults()
+	fmt.Println("\nExamples:")
+	fmt.Println("  # Discover directory structure:")
+	fmt.Println("  webspider -url https://example.com/files/ -discover-only -depth 5")
+	fmt.Println("  ")
+	fmt.Println("  # Download specific files from list:")
+	fmt.Println("  webspider -urls discovered-urls.txt -rate 0.5")
+	fmt.Println("  ")
+	fmt.Println("  # Discover with special rate limiting (2 req/5sec, 10sec block):")
+	fmt.Println("  webspider -url https://sensitive.com/ -special-rate -discover-only")
+	fmt.Println("  ")
+	fmt.Println("  # Custom special rate limiting:")
+	fmt.Println("  webspider -url https://example.com/ -special-rate -max-requests 3 -time-window 10s -block-duration 15s")
+	fmt.Println("  ")
+	fmt.Println("  # Discover and filter by file type:")
+	fmt.Println("  webspider -url https://example.com/ -accept '\\.(pdf|zip|tar\\.gz)$' -rate 2")
+	os.Exit(1)
+}
+
+func runDownloadMode(spider *Spider, urlListFile string, discoverOnly bool) error {
+	urls, err := loadURLsFromFile(urlListFile)
+	if err != nil {
+		return fmt.Errorf("error loading URL list: %w", err)
+	}
+
+	fmt.Printf("Loaded %d URLs from %s\n", len(urls), urlListFile)
+
+	if !discoverOnly {
+		fmt.Println("Starting downloads...")
+		ctx := context.Background()
+		if err := spider.DownloadFiles(ctx, urls); err != nil {
+			return fmt.Errorf("error downloading files: %w", err)
+		}
+		fmt.Println("Downloads completed!")
+	}
+	return nil
+}
+
+func runDiscoveryMode(spider *Spider, baseURL string, saveList string, discoverOnly bool) error {
+	fmt.Printf("Starting discovery from: %s\n", baseURL)
+	ctx := context.Background()
+	urls, err := spider.DiscoverStructure(ctx)
+	if err != nil {
+		return fmt.Errorf("error during discovery: %w", err)
+	}
+
+	fmt.Printf("Discovered %d URLs\n", len(urls))
+
+	// Save discovered URLs
+	if err := spider.SaveDiscoveredURLs(urls, saveList); err != nil {
+		return fmt.Errorf("error saving URL list: %w", err)
+	}
+	fmt.Printf("URL list saved to: %s\n", saveList)
+
+	if !discoverOnly {
+		fmt.Println("Starting downloads...")
+		if err := spider.DownloadFiles(ctx, urls); err != nil {
+			return fmt.Errorf("error downloading files: %w", err)
+		}
+		fmt.Println("Downloads completed!")
+	} else {
+		fmt.Println("Discovery completed. Edit the URL list and run with -urls flag to download.")
+	}
+	return nil
+}
+
 func main() {
 	var (
 		baseURL      = flag.String("url", "", "Base URL to spider")
@@ -482,26 +590,7 @@ func main() {
 	flag.Parse()
 
 	if *baseURL == "" && *urlListFile == "" {
-		fmt.Println("Usage: webspider -url <base-url> [options]")
-		fmt.Println("   or: webspider -urls <url-list-file> [options]")
-		fmt.Println("\nOptions:")
-		flag.PrintDefaults()
-		fmt.Println("\nExamples:")
-		fmt.Println("  # Discover directory structure:")
-		fmt.Println("  webspider -url https://example.com/files/ -discover-only -depth 5")
-		fmt.Println("  ")
-		fmt.Println("  # Download specific files from list:")
-		fmt.Println("  webspider -urls discovered-urls.txt -rate 0.5")
-		fmt.Println("  ")
-		fmt.Println("  # Discover with special rate limiting (2 req/5sec, 10sec block):")
-		fmt.Println("  webspider -url https://sensitive.com/ -special-rate -discover-only")
-		fmt.Println("  ")
-		fmt.Println("  # Custom special rate limiting:")
-		fmt.Println("  webspider -url https://example.com/ -special-rate -max-requests 3 -time-window 10s -block-duration 15s")
-		fmt.Println("  ")
-		fmt.Println("  # Discover and filter by file type:")
-		fmt.Println("  webspider -url https://example.com/ -accept '\\.(pdf|zip|tar\\.gz)$' -rate 2")
-		os.Exit(1)
+		showUsage()
 	}
 
 	config := Config{
@@ -526,48 +615,13 @@ func main() {
 		log.Fatalf("Error creating spider: %v", err)
 	}
 
-	ctx := context.Background()
-
 	if *urlListFile != "" {
-		// Download mode: load URLs from file
-		urls, err := loadURLsFromFile(*urlListFile)
-		if err != nil {
-			log.Fatalf("Error loading URL list: %v", err)
-		}
-
-		fmt.Printf("Loaded %d URLs from %s\n", len(urls), *urlListFile)
-
-		if !*discoverOnly {
-			fmt.Println("Starting downloads...")
-			if err := spider.DownloadFiles(ctx, urls); err != nil {
-				log.Fatalf("Error downloading files: %v", err)
-			}
-			fmt.Println("Downloads completed!")
+		if err := runDownloadMode(spider, *urlListFile, *discoverOnly); err != nil {
+			log.Fatalf("%v", err)
 		}
 	} else {
-		// Discovery mode
-		fmt.Printf("Starting discovery from: %s\n", *baseURL)
-		urls, err := spider.DiscoverStructure(ctx)
-		if err != nil {
-			log.Fatalf("Error during discovery: %v", err)
-		}
-
-		fmt.Printf("Discovered %d URLs\n", len(urls))
-
-		// Save discovered URLs
-		if err := spider.SaveDiscoveredURLs(urls, *saveList); err != nil {
-			log.Fatalf("Error saving URL list: %v", err)
-		}
-		fmt.Printf("URL list saved to: %s\n", *saveList)
-
-		if !*discoverOnly {
-			fmt.Println("Starting downloads...")
-			if err := spider.DownloadFiles(ctx, urls); err != nil {
-				log.Fatalf("Error downloading files: %v", err)
-			}
-			fmt.Println("Downloads completed!")
-		} else {
-			fmt.Println("Discovery completed. Edit the URL list and run with -urls flag to download.")
+		if err := runDiscoveryMode(spider, *baseURL, *saveList, *discoverOnly); err != nil {
+			log.Fatalf("%v", err)
 		}
 	}
 }
