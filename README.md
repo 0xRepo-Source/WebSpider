@@ -35,6 +35,50 @@ go build -o webspider
 go install github.com/0xRepo-Source/WebSpider@latest
 ```
 
+### Windows Setup for Easy Access
+
+For convenient command-line usage on Windows, you can set up WebSpider to be accessible from anywhere:
+
+1. **Download/Build WebSpider**:
+   - Download `webspider-windows-amd64.exe` from the [releases page](https://github.com/0xRepo-Source/WebSpider/releases)
+   - Or build from source as shown above
+
+2. **Create Directory and Rename**:
+   ```cmd
+   # Create a dedicated directory
+   mkdir C:\WebSpider
+   
+   # Copy the executable and rename it for easier typing
+   copy webspider-windows-amd64.exe C:\WebSpider\ws.exe
+   ```
+
+3. **Add to PATH Environment Variable**:
+   - Press `Win + R`, type `sysdm.cpl`, press Enter
+   - Click "Environment Variables" button
+   - Under "User variables" or "System variables", find and select "Path"
+   - Click "Edit" → "New" → Add `C:\WebSpider`
+   - Click "OK" to close all dialogs
+
+4. **Usage from Anywhere**:
+   ```cmd
+   # Now you can use 'ws' from any directory
+   ws -url "https://example.com/files/" -discover-only -verbose
+   ws -urls "discovered-urls.txt" -rate 0.5
+   ws -special-rate -url "https://sensitive-server.com/" -discover-only
+   ```
+
+### PowerShell Alternative Setup
+
+If you prefer using PowerShell profiles:
+
+```powershell
+# Create a PowerShell function (add to your PowerShell profile)
+function ws { & "C:\WebSpider\ws.exe" $args }
+
+# Usage
+ws -url "https://example.com/" -discover-only
+```
+
 ### Basic Usage
 
 ```bash
@@ -45,6 +89,13 @@ go install github.com/0xRepo-Source/WebSpider@latest
 
 # Download selected files
 ./webspider -urls "discovered-urls.txt" -rate 0.5
+```
+
+**Windows (after PATH setup):**
+```cmd
+# Same commands but using the shorter 'ws' alias
+ws -url "https://example.com/files/" -discover-only -verbose
+ws -urls "discovered-urls.txt" -rate 0.5
 ```
 
 ## Advanced Usage
@@ -149,6 +200,11 @@ Download research papers and documentation while respecting university server po
   -verbose
 ```
 
+**Windows:**
+```cmd
+ws -url "https://university.edu/papers/" -special-rate -accept "\.(pdf|doc|docx)$" -discover-only -verbose
+```
+
 ### Software Distribution
 Mirror software releases with conservative rate limiting:
 
@@ -160,6 +216,11 @@ Mirror software releases with conservative rate limiting:
   -output "./software-mirror"
 ```
 
+**Windows:**
+```cmd
+ws -url "https://releases.project.org/" -rate 0.5 -accept "\.(tar\.gz|zip|deb|rpm)$" -depth 3 -output ".\software-mirror"
+```
+
 ### Documentation Archival
 Archive website documentation excluding assets:
 
@@ -168,6 +229,11 @@ Archive website documentation excluding assets:
   -reject "\.(jpg|jpeg|png|gif|css|js)$" \
   -accept "\.(html|htm|pdf|txt|md)$" \
   -rate 2.0
+```
+
+**Windows:**
+```cmd
+ws -url "https://docs.example.com/" -reject "\.(jpg|jpeg|png|gif|css|js)$" -accept "\.(html|htm|pdf|txt|md)$" -rate 2.0
 ```
 
 ## Best Practices
@@ -230,6 +296,26 @@ Archive website documentation excluding assets:
 ```bash
 # Solution: Limit depth and use filtering
 ./webspider -depth 2 -accept "\.(pdf|zip)$"
+```
+
+### Windows-Specific Issues
+
+**"ws is not recognized" Error**
+```cmd
+# Check if PATH was added correctly
+echo %PATH%
+
+# Verify the executable exists
+dir C:\WebSpider\ws.exe
+
+# Try full path if PATH isn't working
+C:\WebSpider\ws.exe -url "https://example.com/" -discover-only
+```
+
+**Permission Issues on Windows**
+```cmd
+# Run Command Prompt as Administrator when setting up PATH
+# Or use PowerShell profile method instead
 ```
 
 ### Getting Help
