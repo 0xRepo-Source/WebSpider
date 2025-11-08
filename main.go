@@ -213,33 +213,57 @@ func (s *Spider) cleanOldRequestTimes(now time.Time) {
 }
 
 func (s *Spider) waitForRateLimit(ctx context.Context, now time.Time) error {
-	if len(s.requestTimes) < s.config.MaxRequests {
-		return nil
+	// For special rate limiting, we need to ensure requests are properly spaced
+	if len(s.requestTimes) >= s.config.MaxRequests {
+		// Calculate how long to wait until the oldest request falls outside the window
+		oldestRequest := s.requestTimes[0]
+		waitTime := s.config.TimeWindow - now.Sub(oldestRequest)
+
+		if waitTime > 0 {
+			if s.config.Verbose {
+				log.Printf("Rate limit reached (%d requests in %v), waiting %v",
+					len(s.requestTimes), s.config.TimeWindow, waitTime)
+			}
+			s.requestTimeMu.Unlock()
+
+			// Use context-aware sleep
+			select {
+			case <-ctx.Done():
+				s.requestTimeMu.Lock()
+				return ctx.Err()
+			case <-time.After(waitTime):
+				s.requestTimeMu.Lock()
+				// Clean old times after waiting
+				s.cleanOldRequestTimes(time.Now())
+				return nil
+			}
+		}
+	} else if len(s.requestTimes) > 0 {
+		// Even if we haven't hit the limit, ensure minimum spacing between requests
+		// This prevents burst behavior by enforcing consistent spacing
+		minInterval := s.config.TimeWindow / time.Duration(s.config.MaxRequests)
+		lastRequest := s.requestTimes[len(s.requestTimes)-1]
+		timeSinceLastRequest := now.Sub(lastRequest)
+
+		if timeSinceLastRequest < minInterval {
+			waitTime := minInterval - timeSinceLastRequest
+			if s.config.Verbose {
+				log.Printf("Enforcing minimum interval of %v, waiting %v", minInterval, waitTime)
+			}
+			s.requestTimeMu.Unlock()
+
+			select {
+			case <-ctx.Done():
+				s.requestTimeMu.Lock()
+				return ctx.Err()
+			case <-time.After(waitTime):
+				s.requestTimeMu.Lock()
+				return nil
+			}
+		}
 	}
 
-	// Calculate how long to wait
-	oldestRequest := s.requestTimes[0]
-	waitTime := s.config.TimeWindow - now.Sub(oldestRequest)
-
-	if waitTime <= 0 {
-		return nil
-	}
-
-	if s.config.Verbose {
-		log.Printf("Rate limit reached (%d requests in %v), waiting %v",
-			len(s.requestTimes), s.config.TimeWindow, waitTime)
-	}
-	s.requestTimeMu.Unlock()
-
-	// Use context-aware sleep
-	select {
-	case <-ctx.Done():
-		s.requestTimeMu.Lock()
-		return ctx.Err()
-	case <-time.After(waitTime):
-		s.requestTimeMu.Lock()
-		return nil
-	}
+	return nil
 }
 
 func (s *Spider) handleSpecialRateLimit(ctx context.Context) error {
@@ -340,7 +364,12 @@ func (s *Spider) processLinks(ctx context.Context, doc *goquery.Document, baseUR
 	}
 
 	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, 5) // Limit concurrent requests
+	// Limit concurrent requests - use 1 for special rate limiting, 5 for normal
+	concurrentLimit := 5
+	if s.config.SpecialRate {
+		concurrentLimit = 1 // Force sequential requests for special rate limiting
+	}
+	semaphore := make(chan struct{}, concurrentLimit)
 
 	doc.Find("a[href]").Each(func(i int, sel *goquery.Selection) {
 		href, exists := sel.Attr("href")
