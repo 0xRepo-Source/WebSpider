@@ -37,6 +37,8 @@ type Config struct {
 	MaxRequests   int           // Max requests in time window (default: 2)
 	TimeWindow    time.Duration // Time window (default: 5s)
 	BlockDuration time.Duration // How long server blocks access (default: 10s)
+	// Robots.txt support
+	IgnoreRobots bool // Ignore robots.txt rules (default: false, respect robots.txt)
 }
 
 type Spider struct {
@@ -52,6 +54,9 @@ type Spider struct {
 	requestTimes  []time.Time // Track recent request times
 	lastBlockTime time.Time   // When we were last blocked
 	requestTimeMu sync.Mutex  // Mutex for request time tracking
+	// Robots.txt support
+	robotsCache map[string]*RobotsData // Cache robots.txt by domain
+	robotsMu    sync.RWMutex           // Mutex for robots cache
 }
 
 type DiscoveredFile struct {
@@ -62,6 +67,20 @@ type DiscoveredFile struct {
 	Type     string `json:"type"`
 }
 
+// RobotsRule represents a single disallow/allow rule from robots.txt
+type RobotsRule struct {
+	Pattern string
+	Allow   bool // true for Allow, false for Disallow
+}
+
+// RobotsData holds parsed robots.txt information for a domain
+type RobotsData struct {
+	UserAgents []string      // User-agent patterns this applies to
+	Rules      []RobotsRule  // Disallow/Allow rules
+	CrawlDelay time.Duration // Crawl-delay in seconds
+	FetchTime  time.Time     // When this was fetched for caching
+}
+
 func NewSpider(config Config) (*Spider, error) {
 	s := &Spider{
 		config:       config,
@@ -69,6 +88,7 @@ func NewSpider(config Config) (*Spider, error) {
 		visited:      make(map[string]bool),
 		discovered:   make([]string, 0),
 		requestTimes: make([]time.Time, 0),
+		robotsCache:  make(map[string]*RobotsData),
 	}
 
 	// Setup HTTP client with timeout
@@ -96,7 +116,22 @@ func NewSpider(config Config) (*Spider, error) {
 	return s, nil
 }
 
-func (s *Spider) makeRequest(ctx context.Context, method, url string) (*http.Response, error) {
+func (s *Spider) makeRequest(ctx context.Context, method, urlStr string) (*http.Response, error) {
+	// Check robots.txt crawl-delay
+	if parsedURL, err := url.Parse(urlStr); err == nil {
+		if robotsData, err := s.fetchRobotsTxt(parsedURL.Host); err == nil && robotsData.CrawlDelay > 0 {
+			// Apply crawl-delay if it's longer than our current rate limit
+			crawlDelayRate := 1.0 / robotsData.CrawlDelay.Seconds()
+			if crawlDelayRate < s.config.RateLimit {
+				// Create a temporary limiter with the crawl-delay rate
+				crawlLimiter := rate.NewLimiter(rate.Limit(crawlDelayRate), 1)
+				if err := crawlLimiter.Wait(ctx); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
 	if s.config.SpecialRate {
 		// Handle special rate limiting (e.g., 2 requests per 5 seconds)
 		if err := s.handleSpecialRateLimit(ctx); err != nil {
@@ -109,7 +144,7 @@ func (s *Spider) makeRequest(ctx context.Context, method, url string) (*http.Res
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	req, err := http.NewRequestWithContext(ctx, method, urlStr, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +153,7 @@ func (s *Spider) makeRequest(ctx context.Context, method, url string) (*http.Res
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
 	if s.config.Verbose {
-		log.Printf("Requesting: %s %s", method, url)
+		log.Printf("Requesting: %s %s", method, urlStr)
 	}
 
 	resp, err := s.client.Do(req)
@@ -153,7 +188,7 @@ func (s *Spider) waitForBlockExpiry(ctx context.Context, now time.Time) (time.Ti
 			log.Printf("Still in block period, waiting %v", remainingWait)
 		}
 		s.requestTimeMu.Unlock()
-		
+
 		select {
 		case <-ctx.Done():
 			s.requestTimeMu.Lock()
@@ -369,6 +404,14 @@ func (s *Spider) discover(ctx context.Context, targetURL string, depth int) erro
 		return nil
 	}
 
+	// Check robots.txt if not ignoring it
+	if !s.config.IgnoreRobots && !s.isAllowedByRobots(targetURL) {
+		if s.config.Verbose {
+			fmt.Printf("URL blocked by robots.txt, skipping: %s\n", targetURL)
+		}
+		return nil
+	}
+
 	s.mu.Lock()
 	if s.visited[targetURL] {
 		s.mu.Unlock()
@@ -433,6 +476,14 @@ func (s *Spider) DownloadFiles(ctx context.Context, urls []string) error {
 }
 
 func (s *Spider) downloadFile(ctx context.Context, rawURL string) error {
+	// Check robots.txt if not ignoring it
+	if !s.config.IgnoreRobots && !s.isAllowedByRobots(rawURL) {
+		if s.config.Verbose {
+			fmt.Printf("Download blocked by robots.txt, skipping: %s\n", rawURL)
+		}
+		return nil
+	}
+
 	resp, err := s.makeRequest(ctx, "GET", rawURL)
 	if err != nil {
 		return err
@@ -566,6 +617,175 @@ func runDiscoveryMode(spider *Spider, baseURL string, saveList string, discoverO
 	return nil
 }
 
+// fetchRobotsTxt fetches and parses robots.txt for a domain
+func (s *Spider) fetchRobotsTxt(domain string) (*RobotsData, error) {
+	s.robotsMu.RLock()
+	if cached, exists := s.robotsCache[domain]; exists {
+		// Cache robots.txt for 24 hours
+		if time.Since(cached.FetchTime) < 24*time.Hour {
+			s.robotsMu.RUnlock()
+			return cached, nil
+		}
+	}
+	s.robotsMu.RUnlock()
+
+	robotsURL := fmt.Sprintf("https://%s/robots.txt", domain)
+	if s.config.Verbose {
+		fmt.Printf("Fetching robots.txt from: %s\n", robotsURL)
+	}
+
+	req, err := http.NewRequest("GET", robotsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating robots.txt request: %w", err)
+	}
+
+	req.Header.Set("User-Agent", s.config.UserAgent)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		// If robots.txt is not accessible, assume all is allowed
+		if s.config.Verbose {
+			fmt.Printf("Could not fetch robots.txt from %s: %v (assuming all allowed)\n", robotsURL, err)
+		}
+		return &RobotsData{FetchTime: time.Now()}, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		// No robots.txt means everything is allowed
+		if s.config.Verbose {
+			fmt.Printf("No robots.txt found at %s (assuming all allowed)\n", robotsURL)
+		}
+		robotsData := &RobotsData{FetchTime: time.Now()}
+		s.robotsMu.Lock()
+		s.robotsCache[domain] = robotsData
+		s.robotsMu.Unlock()
+		return robotsData, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch robots.txt: %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading robots.txt: %w", err)
+	}
+
+	robotsData := s.parseRobotsTxt(string(body))
+	s.robotsMu.Lock()
+	s.robotsCache[domain] = robotsData
+	s.robotsMu.Unlock()
+
+	if s.config.Verbose {
+		fmt.Printf("Loaded robots.txt for %s: %d rules, crawl-delay: %v\n",
+			domain, len(robotsData.Rules), robotsData.CrawlDelay)
+	}
+
+	return robotsData, nil
+}
+
+// parseRobotsTxt parses robots.txt content and extracts rules for our user agent
+func (s *Spider) parseRobotsTxt(content string) *RobotsData {
+	data := &RobotsData{FetchTime: time.Now()}
+	lines := strings.Split(content, "\n")
+
+	var applicableToUs bool
+	userAgent := strings.ToLower(s.config.UserAgent)
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Split on first colon
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		field := strings.TrimSpace(strings.ToLower(parts[0]))
+		value := strings.TrimSpace(parts[1])
+
+		switch field {
+		case "user-agent":
+			// Check if this applies to our user agent
+			applicableToUs = value == "*" ||
+				strings.Contains(userAgent, strings.ToLower(value)) ||
+				strings.Contains(strings.ToLower(value), "webspider")
+
+		case "disallow":
+			if applicableToUs && value != "" {
+				data.Rules = append(data.Rules, RobotsRule{
+					Pattern: value,
+					Allow:   false,
+				})
+			}
+
+		case "allow":
+			if applicableToUs && value != "" {
+				data.Rules = append(data.Rules, RobotsRule{
+					Pattern: value,
+					Allow:   true,
+				})
+			}
+
+		case "crawl-delay":
+			if applicableToUs {
+				if delay, err := time.ParseDuration(value + "s"); err == nil {
+					data.CrawlDelay = delay
+				}
+			}
+		}
+	}
+
+	return data
+}
+
+// isAllowedByRobots checks if a URL is allowed by robots.txt rules
+func (s *Spider) isAllowedByRobots(urlStr string) bool {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return true // If we can't parse URL, assume allowed
+	}
+
+	domain := parsedURL.Host
+	robotsData, err := s.fetchRobotsTxt(domain)
+	if err != nil {
+		if s.config.Verbose {
+			fmt.Printf("Error fetching robots.txt for %s: %v (assuming allowed)\n", domain, err)
+		}
+		return true // If we can't fetch robots.txt, assume allowed
+	}
+
+	path := parsedURL.Path
+	if path == "" {
+		path = "/"
+	}
+
+	// Apply robots.txt rules in order (most specific first)
+	for _, rule := range robotsData.Rules {
+		if s.matchesRobotPattern(path, rule.Pattern) {
+			if s.config.Verbose && !rule.Allow {
+				fmt.Printf("URL blocked by robots.txt: %s (rule: %s)\n", urlStr, rule.Pattern)
+			}
+			return rule.Allow
+		}
+	}
+
+	return true // Default allow if no rules match
+}
+
+// matchesRobotPattern checks if a path matches a robots.txt pattern
+func (s *Spider) matchesRobotPattern(path, pattern string) bool {
+	if pattern == "/" {
+		return true // "/" matches everything
+	}
+
+	// Simple prefix matching (robots.txt standard)
+	return strings.HasPrefix(path, pattern)
+}
+
 func main() {
 	var (
 		baseURL      = flag.String("url", "", "Base URL to spider")
@@ -585,6 +805,8 @@ func main() {
 		maxRequests   = flag.Int("max-requests", 2, "Max requests in time window (for special rate limiting)")
 		timeWindow    = flag.Duration("time-window", 5*time.Second, "Time window for request limiting")
 		blockDuration = flag.Duration("block-duration", 10*time.Second, "Duration server blocks access after rate limit")
+		// Robots.txt flags
+		ignoreRobots = flag.Bool("ignore-robots", false, "Ignore robots.txt rules (default: respect robots.txt)")
 	)
 
 	flag.Parse()
@@ -608,6 +830,7 @@ func main() {
 		MaxRequests:   *maxRequests,
 		TimeWindow:    *timeWindow,
 		BlockDuration: *blockDuration,
+		IgnoreRobots:  *ignoreRobots,
 	}
 
 	spider, err := NewSpider(config)

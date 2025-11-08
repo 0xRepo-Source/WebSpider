@@ -11,6 +11,7 @@ A sophisticated web directory crawler built in Go that provides advanced rate li
 ## Features
 
 - **Advanced Rate Limiting**: Supports both standard requests-per-second limiting and specialized burst-with-backoff patterns
+- **Robots.txt Support**: Automatic robots.txt fetching, parsing, and compliance with crawl-delay and disallow/allow rules
 - **Two-Phase Operation**: Discover directory structure first, then selectively download only desired files
 - **Intelligent Filtering**: Powerful regex-based URL acceptance and rejection patterns
 - **Respectful Crawling**: Built-in detection of rate limiting responses with automatic backoff
@@ -187,6 +188,19 @@ Target specific file types and exclude unwanted content:
 | `-user-agent` | Custom User-Agent string | `WebSpider/1.0` | `Mozilla/5.0...` |
 | `-timeout` | HTTP request timeout | `30s` | `60s` |
 
+### Robots.txt Compliance
+
+| Flag | Description | Default | Example |
+|------|-------------|---------|---------|
+| `-ignore-robots` | Ignore robots.txt rules | `false` (respects robots.txt) | `-ignore-robots` |
+
+**Robots.txt Features:**
+- **Automatic fetching**: Downloads and parses robots.txt from each domain
+- **User-agent matching**: Respects rules for `WebSpider`, `*`, and custom user agents
+- **Crawl-delay support**: Automatically adjusts rate limiting based on `Crawl-delay` directive
+- **Path filtering**: Honors `Disallow` and `Allow` path patterns
+- **Caching**: Caches robots.txt for 24 hours to reduce server load
+
 ## Use Cases
 
 ### Academic Research
@@ -236,13 +250,40 @@ Archive website documentation excluding assets:
 ws -url "https://docs.example.com/" -reject "\.(jpg|jpeg|png|gif|css|js)$" -accept "\.(html|htm|pdf|txt|md)$" -rate 2.0
 ```
 
+### Robots.txt Compliant Crawling
+Crawl a website while automatically respecting robots.txt rules:
+
+```bash
+./webspider -url "https://example.com/data/" \
+  -verbose \
+  -discover-only \
+  -accept "\.(csv|json|xml)$"
+```
+
+**Windows:**
+```cmd
+ws -url "https://example.com/data/" -verbose -discover-only -accept "\.(csv|json|xml)$"
+```
+
+This will:
+- Automatically fetch and parse robots.txt from example.com
+- Respect any `Disallow` paths that block access to `/data/` or subdirectories
+- Honor `Crawl-delay` directives by adjusting the rate limiter
+- Skip URLs blocked by robots.txt (shown in verbose output)
+
+To override robots.txt protection (use responsibly):
+```bash
+./webspider -url "https://example.com/data/" -ignore-robots -rate 0.5
+```
+
 ## Best Practices
 
 ### Respectful Crawling
 - Always start with `-discover-only` to understand the site structure
+- WebSpider automatically respects robots.txt by default
 - Use conservative rate limits (`0.5-1.0` req/sec) for unknown servers
 - Monitor server responses with `-verbose` flag
-- Respect robots.txt when possible
+- Only use `-ignore-robots` when you have permission to bypass robots.txt
 
 ### Efficient Filtering
 - Use `-accept` patterns to target specific file types early
