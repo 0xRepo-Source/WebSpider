@@ -5,6 +5,15 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/0xRepo-Source/WebSpider)](https://goreportcard.com/report/github.com/0xRepo-Source/WebSpider)
 [![Release](https://img.shields.io/github/v/release/0xRepo-Source/WebSpider)](https://github.com/0xRepo-Source/WebSpider/releases)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/0xRepo-Source/WebSpider/build.yml)](https://github.com/0xRepo-Source/WebSpider/actions)
+[![Downloads](https://img.shields.io/github/downloads/0xRepo-Source/WebSpider/total?style=flat&logo=github)](https://github.com/0xRepo-Source/WebSpider/releases)
+[![GitHub stars](https://img.shields.io/github/stars/0xRepo-Source/WebSpider?style=flat&logo=github)](https://github.com/0xRepo-Source/WebSpider/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/0xRepo-Source/WebSpider?style=flat&logo=github)](https://github.com/0xRepo-Source/WebSpider/network/members)
+[![GitHub issues](https://img.shields.io/github/issues/0xRepo-Source/WebSpider?style=flat&logo=github)](https://github.com/0xRepo-Source/WebSpider/issues)
+[![GitHub last commit](https://img.shields.io/github/last-commit/0xRepo-Source/WebSpider?style=flat&logo=github)](https://github.com/0xRepo-Source/WebSpider/commits/main)
+[![Code size](https://img.shields.io/github/languages/code-size/0xRepo-Source/WebSpider?style=flat&logo=github)](https://github.com/0xRepo-Source/WebSpider)
+[![Top language](https://img.shields.io/github/languages/top/0xRepo-Source/WebSpider?style=flat&logo=go)](https://github.com/0xRepo-Source/WebSpider)
+[![Robots.txt Compliant](https://img.shields.io/badge/robots.txt-compliant-green?style=flat&logo=robot)](https://www.robotstxt.org/)
+[![Cross Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat)](https://github.com/0xRepo-Source/WebSpider/releases)
 
 A sophisticated web directory crawler built in Go that provides advanced rate limiting, intelligent filtering, and selective downloading capabilities. Designed as a modern alternative to `wget --spider` with enhanced features for respectful web crawling.
 
