@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🐛 Fixed
+- **Special rate limiting burst behavior**: Fixed issue where special rate limiting allowed 4-70 request bursts instead of controlled spacing
+- **Sequential processing**: Special rate limiting now forces sequential requests (concurrentLimit=1) to prevent simultaneous bypassing
+- **Minimum interval enforcement**: Now calculates and enforces minimum intervals between ALL requests (TimeWindow ÷ MaxRequests)
+- **Improved timing accuracy**: Better request spacing prevents server blocking with consistent timing
+
+### 🔧 Improved
+- **Rate limiting logic**: Enhanced `waitForRateLimit` function with proper interval calculation
+- **Verbose logging**: Added detailed logging for minimum interval enforcement
+- **Concurrent control**: Dynamic concurrent limits based on rate limiting mode (1 for special, 5 for normal)
+
 ## [1.1.0] - 2025-11-08
 
 ### 🤖 Added - Robots.txt Support
