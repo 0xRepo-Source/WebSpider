@@ -2,9 +2,9 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/WebSpider/webspider)](https://goreportcard.com/report/github.com/WebSpider/webspider)
-[![Release](https://img.shields.io/github/v/release/WebSpider/webspider)](https://github.com/WebSpider/webspider/releases)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/WebSpider/webspider/build.yml)](https://github.com/WebSpider/webspider/actions)
+[![Go Report Card](https://goreportcard.com/badge/github.com/0xRepo-Source/WebSpider)](https://goreportcard.com/report/github.com/0xRepo-Source/WebSpider)
+[![Release](https://img.shields.io/github/v/release/0xRepo-Source/WebSpider)](https://github.com/0xRepo-Source/WebSpider/releases)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/0xRepo-Source/WebSpider/build.yml)](https://github.com/0xRepo-Source/WebSpider/actions)
 
 A sophisticated web directory crawler built in Go that provides advanced rate limiting, intelligent filtering, and selective downloading capabilities. Designed as a modern alternative to `wget --spider` with enhanced features for respectful web crawling.
 
@@ -24,15 +24,15 @@ A sophisticated web directory crawler built in Go that provides advanced rate li
 
 ```bash
 # Clone the repository
-git clone https://github.com/WebSpider/webspider.git
-cd webspider
+git clone https://github.com/0xRepo-Source/WebSpider.git
+cd WebSpider
 
 # Build from source
 go mod tidy
 go build -o webspider
 
 # Or install directly
-go install github.com/WebSpider/webspider@latest
+go install github.com/0xRepo-Source/WebSpider@latest
 ```
 
 ### Basic Usage
@@ -246,8 +246,8 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 ### Development Setup
 
 ```bash
-git clone https://github.com/WebSpider/webspider.git
-cd webspider
+git clone https://github.com/0xRepo-Source/WebSpider.git
+cd WebSpider
 go mod tidy
 go build -o webspider
 ```

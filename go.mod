@@ -1,4 +1,4 @@
-module github.com/WebSpider/webspider
+module github.com/0xRepo-Source/WebSpider
 
 go 1.21
 
